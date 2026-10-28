@@ -18,6 +18,9 @@
     challengeMode: false,
     challengeSelected: new Set(),
     handOrder: [],
+    handStacks: [],
+    handLayoutStartedAt: null,
+    dragHoldTimer: null,
     seenEventId: null,
     seenResultEventId: null,
     memberConnections: new Map(),
@@ -125,7 +128,7 @@
           <p><strong>最后一手：</strong>玩家打出最后一张牌后不立即获胜。顺时针下一位玩家必须选择掀牌或过牌：过牌则最后一手获胜；质疑失败仍由最后一手玩家获胜；质疑成功则最后一手玩家收牌，质疑者开启新一轮。</p>
           <p><strong>剩三张：</strong>房主可开启公开播报。玩家手牌恰好剩 3 张时，全桌会看到提醒。</p>
           <p><strong>掉线：</strong>游戏中有玩家超过 10 秒未恢复连接，本局立即结束。房主离开则房间结束。</p>
-          <p>手牌顺序仅保存在你的浏览器，不会同步给其他人。拖动卡牌可自由排序，也可点“一键理牌”。</p>
+          <p>发牌后手牌会自动按点数组好，同点牌向上叠放并露出每张点数和花色。一副牌时同一牌摞最多 4 张，两副牌时最多 8 张。等待别人操作时可以拖动整摞调整位置，也可以点“一键理牌”。轮到自己出牌时会暂时锁定手牌整理：单击选中一张，在第一张牌上按住并拖动，可以连续选中扫过的牌。手牌排列只保存在你自己的浏览器。</p>
         </div>
       `
     });
@@ -775,6 +778,8 @@
       syncHandOrder();
     } else {
       App.handOrder = [];
+      App.handStacks = [];
+      App.handLayoutStartedAt = null;
       App.selectedCardIds.clear();
       App.challengeMode = false;
       App.challengeSelected.clear();
@@ -912,10 +917,14 @@
     App.selectedCardIds.clear();
     App.challengeSelected.clear();
     App.handOrder = [];
+    App.handStacks = [];
+    App.handLayoutStartedAt = null;
     App.challengeMode = false;
     App.seenEventId = null;
     App.seenResultEventId = null;
     App.dragState = null;
+    window.clearTimeout(App.dragHoldTimer);
+    App.dragHoldTimer = null;
     App.joining = false;
     App.creating = false;
     closeDialog();
@@ -1110,6 +1119,7 @@
 
     const currentPlayer = view.members[game.turn];
     const pendingPlayer = game.pendingWinner ? view.members[game.pendingWinner] : null;
+    const lastPlayer = game.lastPlay ? view.members[game.lastPlay.playerId] : null;
     const turnBanner = $("turn-banner");
     turnBanner.classList.toggle("my-turn", game.turn === App.myId && view.status === "playing");
 
@@ -1127,10 +1137,19 @@
     } else {
       turnBanner.textContent = currentPlayer ? `等待 ${currentPlayer.name} 操作` : "等待玩家操作";
       $("table-hint").textContent = game.target
-        ? `本轮目标为 ${game.target}，桌面牌全部倒扣。`
+        ? `${lastPlayer ? lastPlayer.name : "上一位玩家"}打出的牌仍倒扣在桌面。`
         : "新的一轮即将开始。";
     }
-    $("target-display").textContent = game.target || "—";
+    if (game.lastPlay) {
+      $("last-play-text").textContent =
+        `${lastPlayer ? lastPlayer.name : "玩家"} 打出来 ${game.lastPlay.count} 张`;
+      $("target-display").textContent = game.target || "—";
+    } else {
+      $("last-play-text").textContent = currentPlayer
+        ? `${currentPlayer.name} 准备出牌`
+        : "等待玩家出牌";
+      $("target-display").textContent = "—";
+    }
 
     renderTablePile();
     syncHandOrder();
@@ -1145,61 +1164,177 @@
     if (!game) {
       return;
     }
-    const lastGroupIndex = game.tableGroups.length - 1;
-    $("table-pile").innerHTML = game.tableGroups.length
-      ? game.tableGroups
-          .map((group, groupIndex) => {
-            const player = view.members[group.playerId];
-            const eligible =
-              App.challengeMode &&
-              groupIndex === lastGroupIndex &&
-              game.lastPlay &&
-              game.lastPlay.playerId === group.playerId;
-            return `
-              <div class="table-group ${eligible ? "eligible-group" : ""}">
-                <span class="table-group-label">${Hushu.escapeHtml(player ? player.name : "玩家")} · ${group.cardIds.length} 张</span>
-                ${group.cardIds
-                  .map((cardId) => {
-                    if (eligible) {
-                      const selected = App.challengeSelected.has(cardId);
-                      return `
-                        <button
-                          class="back-card ${selected ? "selected" : ""}"
-                          type="button"
-                          data-table-card="${Hushu.escapeHtml(cardId)}"
-                          aria-label="选择这张倒扣牌"
-                          aria-pressed="${selected}"></button>
-                      `;
-                    }
-                    return '<span class="back-card" aria-hidden="true"></span>';
-                  })
-                  .join("")}
-              </div>
-            `;
+    if (!game.tableGroups.length) {
+      $("table-pile").innerHTML = '<p class="empty-note">桌面上还没有牌</p>';
+      return;
+    }
+
+    const latestIndex = game.tableGroups.length - 1;
+    const currentGroup = game.tableGroups[latestIndex];
+    const previousGroups = game.tableGroups.slice(0, latestIndex);
+    const previousCardCount = previousGroups.reduce(
+      (total, group) => total + group.cardIds.length,
+      0
+    );
+    const currentPlayer = view.members[currentGroup.playerId];
+    const eligible =
+      App.challengeMode &&
+      game.lastPlay &&
+      game.lastPlay.playerId === currentGroup.playerId;
+
+    const historyHtml = previousGroups.length
+      ? `
+        <div class="table-history" title="本轮此前已经跟过的牌">
+          <span class="history-label">前序 ${previousGroups.length} 手</span>
+          <span class="history-stack" aria-hidden="true">
+            <span class="history-back"></span>
+            <span class="history-back"></span>
+            <span class="history-back"></span>
+          </span>
+          <span class="history-count">${previousCardCount} 张</span>
+        </div>
+      `
+      : "";
+
+    $("table-pile").innerHTML = `
+      ${historyHtml}
+      <div class="table-group current-play-group ${eligible ? "eligible-group" : ""}">
+        <span class="table-group-label">${Hushu.escapeHtml(currentPlayer ? currentPlayer.name : "玩家")} 刚打出 ${currentGroup.cardIds.length} 张</span>
+        ${currentGroup.cardIds
+          .map((cardId) => {
+            if (eligible) {
+              const selected = App.challengeSelected.has(cardId);
+              return `
+                <button
+                  class="back-card ${selected ? "selected" : ""}"
+                  type="button"
+                  data-table-card="${Hushu.escapeHtml(cardId)}"
+                  aria-label="选择这张倒扣牌"
+                  aria-pressed="${selected}"></button>
+              `;
+            }
+            return '<span class="back-card" aria-hidden="true"></span>';
           })
-          .join("")
-      : '<p class="empty-note">桌面上还没有牌</p>';
+          .join("")}
+      </div>
+    `;
+  }
+
+  function getHandStackLimit() {
+    return App.view && App.view.settings.deckCount === 2 ? 8 : 4;
+  }
+
+  function flattenHandStacks() {
+    return App.handStacks.flatMap((stack) => stack.cards);
+  }
+
+  function buildDefaultHandStacks(cards) {
+    const limit = getHandStackLimit();
+    const sorted = Hushu.sortCards(cards);
+    const stacks = [];
+    sorted.forEach((card) => {
+      const lastStack = stacks[stacks.length - 1];
+      if (lastStack && lastStack.rank === card.rank && lastStack.cards.length < limit) {
+        lastStack.cards.push(card.id);
+      } else {
+        stacks.push({ rank: card.rank, cards: [card.id] });
+      }
+    });
+    return stacks;
   }
 
   function syncHandOrder() {
     if (!App.view || !App.view.game) {
       App.handOrder = [];
+      App.handStacks = [];
+      App.handLayoutStartedAt = null;
       App.selectedCardIds.clear();
       return;
     }
-    const incomingIds = App.view.game.hand.map((card) => card.id);
+
+    const game = App.view.game;
+    const incomingCards = game.hand;
+    const incomingIds = incomingCards.map((card) => card.id);
     const incomingSet = new Set(incomingIds);
-    const previous = App.handOrder.filter((id) => incomingSet.has(id));
-    const previousSet = new Set(previous);
-    const additions = incomingIds.filter((id) => !previousSet.has(id));
-    App.handOrder = [...previous, ...additions];
+    const cardsById = new Map(incomingCards.map((card) => [card.id, card]));
+    const limit = getHandStackLimit();
+
+    if (App.handLayoutStartedAt !== game.startedAt) {
+      App.handStacks = buildDefaultHandStacks(incomingCards);
+      App.handLayoutStartedAt = game.startedAt;
+      App.selectedCardIds.clear();
+    } else {
+      App.handStacks = App.handStacks
+        .map((stack) => ({
+          rank: stack.rank,
+          cards: stack.cards.filter((id) => incomingSet.has(id))
+        }))
+        .filter((stack) => stack.cards.length);
+
+      const existingIds = new Set(flattenHandStacks());
+      incomingIds
+        .filter((id) => !existingIds.has(id))
+        .forEach((id) => {
+          const card = cardsById.get(id);
+          const matchingStack = App.handStacks.find(
+            (stack) => stack.rank === card.rank && stack.cards.length < limit
+          );
+          if (matchingStack) {
+            matchingStack.cards.push(id);
+          } else {
+            App.handStacks.push({ rank: card.rank, cards: [id] });
+          }
+        });
+    }
+
+    App.handOrder = flattenHandStacks();
     App.selectedCardIds = new Set(
       [...App.selectedCardIds].filter((id) => incomingSet.has(id))
     );
-    const legalChallengeIds = new Set(App.view.game.lastPlay ? App.view.game.lastPlay.cardIds : []);
+    const legalChallengeIds = new Set(game.lastPlay ? game.lastPlay.cardIds : []);
     App.challengeSelected = new Set(
       [...App.challengeSelected].filter((id) => legalChallengeIds.has(id))
     );
+  }
+
+  function createHandCardElement(card, stackIndex, cardIndex, stackLength) {
+    const display = Hushu.getCardDisplay(card);
+    const horizontalGap = window.innerWidth <= 600 ? 20 : 24;
+    const verticalRise = window.innerWidth <= 600 ? 8 : 10;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = [
+      "hand-card",
+      display.red ? "red" : "",
+      display.joker ? "joker" : "",
+      App.selectedCardIds.has(card.id) ? "selected" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+    button.dataset.cardId = card.id;
+    button.dataset.stackIndex = String(stackIndex);
+    button.style.left = `${cardIndex * horizontalGap}px`;
+    // 后面的牌向右上错开，让每张牌左上角的点数和花色都露出来。
+    button.style.top = `${(stackLength - 1 - cardIndex) * verticalRise}px`;
+    button.style.zIndex = String(cardIndex + 1);
+    button.setAttribute(
+      "aria-label",
+      `${display.rank} ${display.suit}，单击${App.view && App.view.game && App.view.game.turn === App.myId ? "选择" : "整理"}`);
+    button.setAttribute("aria-pressed", App.selectedCardIds.has(card.id) ? "true" : "false");
+    button.innerHTML = display.joker
+      ? `
+        <span class="rank">${Hushu.escapeHtml(display.rank)}</span>
+        <span class="suit">${display.suit}</span>
+        <span class="wild-badge">万能</span>
+        <span class="center-suit">${display.suit}</span>
+      `
+      : `
+        <span class="rank">${Hushu.escapeHtml(display.rank)}</span>
+        <span class="suit">${display.suit}</span>
+        ${display.wild ? '<span class="wild-badge">万能</span>' : ""}
+        <span class="center-suit">${display.suit}</span>
+      `;
+    return button;
   }
 
   function renderMyHand() {
@@ -1211,50 +1346,66 @@
     }
     const cardsById = new Map(view.game.hand.map((card) => [card.id, card]));
     const previousScrollLeft = hand.scrollLeft;
-    if (!App.handOrder.length) {
+    const selectingCards =
+      view.status === "playing" &&
+      view.game.turn === App.myId &&
+      view.game.phase !== "pending" &&
+      !App.challengeMode;
+    hand.classList.toggle("can-arrange", canArrangeHand());
+    hand.classList.toggle("can-select", selectingCards);
+    if (!App.handStacks.length) {
       hand.innerHTML = '<p class="empty-hand">暂时没有手牌。</p>';
       return;
     }
 
     const fragment = document.createDocumentFragment();
-    App.handOrder.forEach((cardId) => {
-      const card = cardsById.get(cardId);
-      if (!card) {
-        return;
+    App.handStacks.forEach((stack, stackIndex) => {
+      const stackNode = document.createElement("div");
+      stackNode.className = "hand-stack";
+      stackNode.dataset.stackIndex = String(stackIndex);
+      stackNode.dataset.stackRank = stack.rank;
+      const horizontalGap = window.innerWidth <= 600 ? 20 : 24;
+      const verticalRise = window.innerWidth <= 600 ? 8 : 10;
+      stackNode.style.setProperty("--stack-count", String(stack.cards.length));
+      stackNode.style.setProperty(
+        "--stack-offset",
+        `${Math.max(0, stack.cards.length - 1) * horizontalGap}px`
+      );
+      stackNode.style.setProperty(
+        "--stack-rise",
+        `${Math.max(0, stack.cards.length - 1) * verticalRise}px`
+      );
+
+      stack.cards.forEach((cardId, cardIndex) => {
+        const card = cardsById.get(cardId);
+        if (card) {
+          stackNode.appendChild(
+            createHandCardElement(card, stackIndex, cardIndex, stack.cards.length)
+          );
+        }
+      });
+      if (stack.cards.length > 1) {
+        const badge = document.createElement("span");
+        badge.className = "hand-stack-count";
+        badge.textContent = `×${stack.cards.length}`;
+        stackNode.appendChild(badge);
       }
-      const display = Hushu.getCardDisplay(card);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = [
-        "hand-card",
-        display.red ? "red" : "",
-        display.joker ? "joker" : "",
-        App.selectedCardIds.has(cardId) ? "selected" : ""
-      ]
-        .filter(Boolean)
-        .join(" ");
-      button.dataset.cardId = cardId;
-      button.setAttribute("aria-pressed", App.selectedCardIds.has(cardId) ? "true" : "false");
-      button.setAttribute("aria-label", `${display.rank} ${display.suit}，点击选择，拖动排序`);
-      button.innerHTML = display.joker
-        ? `
-          <span class="rank">${Hushu.escapeHtml(display.rank)}</span>
-          <span class="suit">${display.suit}</span>
-          <span class="wild-badge">万能</span>
-          <span class="center-suit">${display.suit}</span>
-        `
-        : `
-          <span class="rank">${Hushu.escapeHtml(display.rank)}</span>
-          <span class="suit">${display.suit}</span>
-          ${display.wild ? '<span class="wild-badge">万能</span>' : ""}
-          <span class="center-suit">${display.suit}</span>
-        `;
-      fragment.appendChild(button);
+      fragment.appendChild(stackNode);
     });
     hand.replaceChildren(fragment);
     requestAnimationFrame(() => {
       hand.scrollLeft = previousScrollLeft;
     });
+  }
+
+  function canArrangeHand() {
+    if (!App.view || !App.view.game) {
+      return false;
+    }
+    return !(
+      App.view.status === "playing" &&
+      App.view.game.turn === App.myId
+    );
   }
 
   function renderGameActions() {
@@ -1300,10 +1451,19 @@
     $("confirm-challenge-button").disabled =
       App.challengeSelected.size !== view.challengeCount;
 
+    const canArrange = canArrangeHand();
+    const sortButton = $("sort-hand-button");
+    sortButton.disabled = !canArrange;
+    sortButton.title = canArrange ? "按点数、花色重新整理手牌" : "轮到你出牌时暂时不能理牌";
+
     if (selectedCount === 0) {
-      $("selection-summary").textContent = game.target
-        ? `本轮目标 ${game.target}`
-        : "未选择手牌";
+      if (canArrange) {
+        $("selection-summary").textContent = `共 ${App.handStacks.length} 摞 · 可拖动整理`;
+      } else if (pending) {
+        $("selection-summary").textContent = "最后一手已锁定";
+      } else {
+        $("selection-summary").textContent = "单击选牌 · 按住拖动连选";
+      }
     } else {
       $("selection-summary").textContent = `已选 ${selectedCount} 张 · 张数上限 ${view.playLimit}`;
     }
@@ -1316,9 +1476,9 @@
     } else if (pending && myTurn) {
       help = "这是最后一手。掀牌检查真伪；过牌表示不质疑并结束本局。";
     } else if (myTurn && !game.target) {
-      help = "你是新一轮首位：选择目标点数并选牌，然后点“出牌”。";
+      help = "单击选牌；按住第一张牌拖动，可以连续选中扫过的牌。";
     } else if (myTurn) {
-      help = `跟牌时会自动宣告 ${game.target}，张数不能超过 ${view.playLimit}。`;
+      help = `跟牌自动宣告 ${game.target}；单击选牌，按住拖动可连选。`;
     } else if (game.phase === "pending") {
       help = "最后一手正在等待下一位玩家质疑或认可。";
     }
@@ -1636,10 +1796,86 @@
     if (!view || !view.game) {
       return;
     }
-    const cardsById = new Map(view.game.hand.map((card) => [card.id, card]));
-    const cards = App.handOrder.map((id) => cardsById.get(id)).filter(Boolean);
-    App.handOrder = Hushu.sortCards(cards).map((card) => card.id);
+    if (!canArrangeHand()) {
+      showToast("轮到你出牌时暂时不能理牌。", "error");
+      return;
+    }
+    App.handStacks = buildDefaultHandStacks(view.game.hand);
+    App.handOrder = flattenHandStacks();
     renderMyHand();
+  }
+
+  function isCardSelectionTurn() {
+    return Boolean(
+      App.view &&
+        App.view.game &&
+        App.view.status === "playing" &&
+        App.view.game.turn === App.myId &&
+        App.view.game.phase !== "pending" &&
+        !App.challengeMode
+    );
+  }
+
+  function setCardSelectionVisual(cardId, selected) {
+    const cardNode = $("my-hand").querySelector(`[data-card-id="${CSS.escape(cardId)}"]`);
+    if (cardNode) {
+      cardNode.classList.toggle("selected", selected);
+      cardNode.setAttribute("aria-pressed", selected ? "true" : "false");
+    }
+  }
+
+  function addHandCardToSelection(cardId) {
+    const view = App.view;
+    if (!view || App.selectedCardIds.has(cardId)) {
+      return false;
+    }
+    if (App.selectedCardIds.size >= view.playLimit) {
+      return false;
+    }
+    App.selectedCardIds.add(cardId);
+    setCardSelectionVisual(cardId, true);
+    renderGameActions();
+    return true;
+  }
+
+  function selectHandCardRange(startCardId, endCardId) {
+    const startIndex = App.handOrder.indexOf(startCardId);
+    const endIndex = App.handOrder.indexOf(endCardId);
+    if (startIndex < 0 || endIndex < 0) {
+      return;
+    }
+    const step = startIndex <= endIndex ? 1 : -1;
+    for (
+      let index = startIndex;
+      index !== endIndex + step;
+      index += step
+    ) {
+      if (!addHandCardToSelection(App.handOrder[index]) && App.selectedCardIds.size >= App.view.playLimit) {
+        break;
+      }
+    }
+  }
+
+  function findHandCardAtPoint(clientX, clientY) {
+    let hit = null;
+    let furthestIndex = -1;
+    $("my-hand").querySelectorAll(".hand-card").forEach((card) => {
+      const rect = card.getBoundingClientRect();
+      const inside =
+        clientX >= rect.left - 2 &&
+        clientX <= rect.right + 2 &&
+        clientY >= rect.top - 4 &&
+        clientY <= rect.bottom + 4;
+      if (inside) {
+        // 叠牌时多张牌会覆盖同一个点，取手牌顺序里更靠后的那张作为终点。
+        const index = App.handOrder.indexOf(card.dataset.cardId);
+        if (index > furthestIndex) {
+          furthestIndex = index;
+          hit = card;
+        }
+      }
+    });
+    return hit;
   }
 
   function beginHandDrag(event) {
@@ -1650,14 +1886,37 @@
     if (!card) {
       return;
     }
+    const selecting = isCardSelectionTurn();
+    const arranging = canArrangeHand();
+    if (!selecting && !arranging) {
+      return;
+    }
+
+    const stack = card.closest(".hand-stack");
     App.dragState = {
+      mode: selecting ? "select" : "arrange",
       cardId: card.dataset.cardId,
+      stackIndex: stack ? Number(stack.dataset.stackIndex) : -1,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      moved: false
+      moved: false,
+      held: false
     };
-    card.classList.add("dragging");
+
+    window.clearTimeout(App.dragHoldTimer);
+    if (selecting) {
+      App.dragHoldTimer = window.setTimeout(() => {
+        const drag = App.dragState;
+        if (!drag || drag.pointerId !== event.pointerId || drag.moved) {
+          return;
+        }
+        drag.held = true;
+        drag.mode = "multi-select";
+        addHandCardToSelection(drag.cardId);
+        $("my-hand").classList.add("is-multi-selecting");
+      }, 260);
+    }
     event.preventDefault();
   }
 
@@ -1667,7 +1926,28 @@
       return;
     }
     const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-    if (!drag.moved && distance < 7) {
+    if (drag.mode === "select" && distance >= 12) {
+      drag.moved = true;
+      window.clearTimeout(App.dragHoldTimer);
+      App.dragHoldTimer = null;
+      return;
+    }
+    if (drag.mode === "multi-select") {
+      event.preventDefault();
+      const handViewport = $("my-hand");
+      const handRect = handViewport.getBoundingClientRect();
+      if (event.clientX > handRect.right - 28) {
+        handViewport.scrollLeft += 14;
+      } else if (event.clientX < handRect.left + 28) {
+        handViewport.scrollLeft -= 14;
+      }
+      const hitCard = findHandCardAtPoint(event.clientX, event.clientY);
+      if (hitCard) {
+        selectHandCardRange(drag.cardId, hitCard.dataset.cardId);
+      }
+      return;
+    }
+    if (drag.mode !== "arrange" || drag.moved || distance < 7) {
       return;
     }
     drag.moved = true;
@@ -1682,31 +1962,58 @@
     }
 
     const target = document.elementFromPoint(event.clientX, event.clientY);
-    const targetCard = target ? target.closest(".hand-card") : null;
-    if (!targetCard || targetCard.dataset.cardId === drag.cardId) {
+    const targetStack = target ? target.closest(".hand-stack") : null;
+    if (!targetStack) {
       return;
     }
 
-    const currentIndex = App.handOrder.indexOf(drag.cardId);
-    if (currentIndex < 0) {
+    const sourceIndex = App.handStacks.findIndex((stack) => stack.cards.includes(drag.cardId));
+    const targetIndex = Number(targetStack.dataset.stackIndex);
+    if (
+      sourceIndex < 0 ||
+      !Number.isInteger(targetIndex) ||
+      sourceIndex === targetIndex ||
+      !App.handStacks[targetIndex]
+    ) {
       return;
     }
-    App.handOrder.splice(currentIndex, 1);
-    let targetIndex = App.handOrder.indexOf(targetCard.dataset.cardId);
-    if (targetIndex < 0) {
-      return;
-    }
-    const rect = targetCard.getBoundingClientRect();
+
+    const sourceStack = App.handStacks[sourceIndex];
+    const destination = App.handStacks[targetIndex];
+    const rect = targetStack.getBoundingClientRect();
     const insertAfter = event.clientX > rect.left + rect.width / 2;
-    if (insertAfter) {
-      targetIndex += 1;
+    const sameRank = sourceStack.rank === destination.rank;
+    const stackLimit = getHandStackLimit();
+
+    if (sameRank && sourceStack.cards.length + destination.cards.length <= stackLimit) {
+      destination.cards.push(...sourceStack.cards);
+      App.handStacks.splice(sourceIndex, 1);
+    } else {
+      if (sameRank && !drag.mergeWarningShown) {
+        drag.mergeWarningShown = true;
+        showToast(`同一叠最多 ${stackLimit} 张，已改为调整牌组位置。`, "important", 2200);
+      }
+      const [movingStack] = App.handStacks.splice(sourceIndex, 1);
+      let destinationIndex = App.handStacks.indexOf(destination);
+      if (destinationIndex < 0) {
+        return;
+      }
+      if (insertAfter) {
+        destinationIndex += 1;
+      }
+      App.handStacks.splice(destinationIndex, 0, movingStack);
     }
-    App.handOrder.splice(targetIndex, 0, drag.cardId);
+    App.handOrder = flattenHandStacks();
     renderMyHand();
     requestAnimationFrame(() => {
-      const movedCard = $("my-hand").querySelector(`[data-card-id="${CSS.escape(drag.cardId)}"]`);
-      if (movedCard) {
-        movedCard.classList.add("dragging");
+      const nextSourceIndex = App.handStacks.findIndex((stack) =>
+        stack.cards.includes(drag.cardId)
+      );
+      const movedStack = $("my-hand").querySelector(
+        `[data-stack-index="${nextSourceIndex}"]`
+      );
+      if (movedStack) {
+        movedStack.classList.add("dragging");
       }
     });
   }
@@ -1716,15 +2023,18 @@
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
+    window.clearTimeout(App.dragHoldTimer);
+    App.dragHoldTimer = null;
     App.dragState = null;
-    if (drag.moved) {
+    $("my-hand").classList.remove("is-multi-selecting");
+    if (drag.mode === "multi-select") {
       renderMyHand();
-    } else {
+      renderGameActions();
+    } else if (drag.mode === "select" && !drag.moved) {
       toggleHandCard(drag.cardId);
-      const card = $("my-hand").querySelector(`[data-card-id="${CSS.escape(drag.cardId)}"]`);
-      if (card) {
-        card.classList.remove("dragging");
-      }
+    } else if (drag.mode === "arrange" && drag.moved) {
+      App.handOrder = flattenHandStacks();
+      renderMyHand();
     }
   }
 
@@ -1732,8 +2042,15 @@
     if (!App.dragState) {
       return;
     }
+    window.clearTimeout(App.dragHoldTimer);
+    App.dragHoldTimer = null;
+    const wasMultiSelect = App.dragState.mode === "multi-select";
     App.dragState = null;
-    renderMyHand();
+    $("my-hand").classList.remove("is-multi-selecting");
+    if (wasMultiSelect) {
+      renderMyHand();
+      renderGameActions();
+    }
   }
 
   function copyInviteLink() {
@@ -1825,6 +2142,8 @@
     App.selectedCardIds.clear();
     App.challengeSelected.clear();
     App.challengeMode = false;
+    App.handStacks = [];
+    App.handLayoutStartedAt = null;
     afterHostMutation();
   }
 
@@ -1912,6 +2231,7 @@
     });
 
     $("my-hand").addEventListener("pointerdown", beginHandDrag);
+    $("my-hand").addEventListener("contextmenu", (event) => event.preventDefault());
     $("my-hand").addEventListener("click", (event) => {
       const card = event.target.closest(".hand-card");
       // 键盘或辅助技术触发的 click 没有指针细节，需要单独完成选择。

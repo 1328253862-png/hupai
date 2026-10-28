@@ -1113,6 +1113,7 @@ input:disabled {
 
 .target-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: center;
   gap: 8px;
@@ -1129,12 +1130,13 @@ input:disabled {
 }
 
 .table-pile {
+  position: relative;
   display: flex;
   min-height: 126px;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .table-group {
@@ -1146,6 +1148,62 @@ input:disabled {
   padding: 7px 12px 4px;
   border-radius: 17px;
   transition: background 150ms ease, box-shadow 150ms ease;
+}
+
+.current-play-group {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.table-history {
+  position: absolute;
+  left: -66px;
+  top: 50%;
+  display: grid;
+  width: 58px;
+  place-items: center;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.25;
+  transform: translateY(-50%);
+}
+
+.history-label,
+.history-count {
+  white-space: nowrap;
+}
+
+.history-stack {
+  position: relative;
+  display: block;
+  width: 38px;
+  height: 56px;
+  margin: 5px 0;
+}
+
+.history-back {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: block;
+  width: 32px;
+  height: 45px;
+  border: 1px solid rgba(255, 253, 247, 0.8);
+  border-radius: 4px;
+  background:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.13) 0 3px, transparent 3px 6px),
+    var(--moss);
+  box-shadow: 0 3px 8px rgba(23, 49, 40, 0.16);
+}
+
+.history-back:nth-child(2) {
+  left: 3px;
+  bottom: 4px;
+}
+
+.history-back:nth-child(3) {
+  left: 6px;
+  bottom: 8px;
 }
 
 .table-group.eligible-group {
@@ -1312,18 +1370,49 @@ button.back-card.selected {
 
 .my-hand {
   display: flex;
-  min-height: 118px;
-  align-items: flex-end;
-  gap: 6px;
+  min-height: 176px;
+  align-items: flex-start;
+  gap: 9px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 10px 2px 6px;
+  padding: 14px 2px 7px;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
 }
 
-.hand-card {
+.hand-stack {
   position: relative;
+  width: calc(70px + var(--stack-offset, 0px));
+  height: calc(102px + var(--stack-rise, 0px));
+  flex: 0 0 auto;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.hand-stack.dragging {
+  opacity: 0.58;
+  transform: translateY(-7px) rotate(1deg);
+}
+
+.hand-stack-count {
+  position: absolute;
+  right: -2px;
+  bottom: -6px;
+  z-index: 40;
+  min-width: 22px;
+  padding: 2px 5px;
+  border: 1px solid rgba(23, 49, 40, 0.1);
+  border-radius: 999px;
+  color: var(--moss-dark);
+  background: #edf3e9;
+  box-shadow: 0 3px 8px rgba(23, 49, 40, 0.12);
+  font-size: 9px;
+  font-weight: 900;
+  text-align: center;
+  pointer-events: none;
+}
+
+.hand-card {
+  position: absolute;
   display: block;
   width: 70px;
   height: 102px;
@@ -1341,23 +1430,15 @@ button.back-card.selected {
 }
 
 .hand-card:hover {
+  z-index: 100 !important;
   transform: translateY(-4px);
 }
 
 .hand-card.selected {
+  z-index: 120 !important;
   border-color: var(--moss);
   box-shadow: 0 0 0 3px rgba(63, 107, 87, 0.16), 0 9px 15px rgba(23, 49, 40, 0.14);
   transform: translateY(-12px);
-}
-
-.hand-card.dragging {
-  z-index: 10;
-  opacity: 0.65;
-  transform: translateY(-16px) rotate(2deg);
-}
-
-.hand-card.drag-target {
-  box-shadow: -4px 0 0 var(--gold);
 }
 
 .hand-card.red {
@@ -1421,6 +1502,18 @@ button.back-card.selected {
   place-items: center;
   color: var(--muted);
   font-size: 12px;
+}
+
+.my-hand.can-arrange .hand-card {
+  cursor: grab;
+}
+
+.my-hand.can-select .hand-card {
+  cursor: pointer;
+}
+
+.my-hand.is-multi-selecting {
+  cursor: crosshair;
 }
 
 .challenge-bar {
@@ -1983,7 +2076,7 @@ button.back-card.selected {
   }
 
   .game-center {
-    width: 45%;
+    width: 61%;
   }
 
   .turn-banner {
@@ -2065,8 +2158,14 @@ button.back-card.selected {
   }
 
   .my-hand {
-    min-height: 100px;
-    gap: 4px;
+    min-height: 145px;
+    gap: 5px;
+    padding-top: 13px;
+  }
+
+  .hand-stack {
+    width: calc(56px + var(--stack-offset, 0px));
+    height: calc(82px + var(--stack-rise, 0px));
   }
 
   .hand-card {
@@ -2093,6 +2192,21 @@ button.back-card.selected {
   .hand-card .wild-badge {
     padding: 1px 3px;
     font-size: 6px;
+  }
+
+  .table-history {
+    left: -53px;
+    width: 47px;
+  }
+
+  .history-stack {
+    width: 31px;
+    height: 48px;
+  }
+
+  .history-back {
+    width: 27px;
+    height: 39px;
   }
 
   .challenge-bar {

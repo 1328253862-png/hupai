@@ -672,6 +672,7 @@
         handCounts[playerId] = room.game.hands[playerId].length;
       });
       gameView = {
+        startedAt: room.game.startedAt,
         hand: (room.game.hands[memberId] || []).map((card) => ({ ...card })),
         handCounts,
         turn: room.game.turn,
