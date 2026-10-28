@@ -2215,6 +2215,34 @@
     $("hand-scroll-right").addEventListener("click", () => {
       $("my-hand").scrollBy({ left: 180, behavior: "smooth" });
     });
+    $("my-hand").addEventListener(
+      "wheel",
+      (event) => {
+        if (event.ctrlKey) {
+          return;
+        }
+        const hand = $("my-hand");
+        const maxScroll = hand.scrollWidth - hand.clientWidth;
+        if (maxScroll <= 1) {
+          return;
+        }
+
+        let delta =
+          Math.abs(event.deltaX) > Math.abs(event.deltaY)
+            ? event.deltaX
+            : event.deltaY;
+        if (event.deltaMode === 1) {
+          delta *= 18;
+        } else if (event.deltaMode === 2) {
+          delta *= hand.clientWidth;
+        }
+
+        // 鼠标在手牌区域内时占据滚轮：只横向浏览手牌，不带动页面上下滚动。
+        event.preventDefault();
+        hand.scrollLeft += delta;
+      },
+      { passive: false }
+    );
     $("play-button").addEventListener("click", playSelectedCards);
     $("challenge-button").addEventListener("click", enterChallengeMode);
     $("pass-button").addEventListener("click", () => sendGameAction("pass", {}));
