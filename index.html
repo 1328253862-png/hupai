@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f2eee4">
+  <meta name="description" content="唬牌本地定制版：2–6 人朋友局，PeerJS + WebRTC 联机。">
+  <title>唬牌（本地定制版）</title>
+
+  <!-- Tailwind 用于页面工具类；业务样式和离线保底样式位于 css/styles.css。 -->
+  <script defer src="https://cdn.tailwindcss.com"></script>
+
+  <!-- PeerJS 固定版本，避免 CDN 的最新版本变化影响联机行为。 -->
+  <script
+    defer
+    src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"
+    onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js'"></script>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <button id="brand-button" class="brand" type="button" aria-label="返回大厅">
+        <span class="brand-mark">唬</span>
+        <span>
+          <strong>唬牌</strong>
+          <small>本地定制版</small>
+        </span>
+      </button>
+      <div class="topbar-actions">
+        <span id="network-pill" class="status-pill" data-state="idle">尚未联机</span>
+        <button id="rules-button" class="icon-button" type="button">规则</button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- 大厅 -->
+      <section id="lobby-screen" class="screen">
+        <div class="lobby-hero">
+          <p class="eyebrow">朋友之间，图个乐</p>
+          <h1>出牌靠胆量，<br><span>掀牌靠眼力。</span></h1>
+          <p class="hero-copy">2–6 人实时联机。房间号发给朋友，房主开局，浏览器直接玩。</p>
+          <div class="feature-row" aria-label="游戏特点">
+            <span>🎭 万能赖子</span>
+            <span>🫣 手动掀牌</span>
+            <span>🔗 P2P 直连</span>
+          </div>
+        </div>
+
+        <div class="lobby-grid">
+          <article class="paper-card profile-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">先选个身份</p>
+                <h2>你的玩家资料</h2>
+              </div>
+              <span id="profile-preview" class="profile-preview" aria-hidden="true">🦊</span>
+            </div>
+            <label class="field-label" for="lobby-name">昵称</label>
+            <input id="lobby-name" class="text-input" type="text" maxlength="10" autocomplete="nickname" placeholder="输入简短昵称">
+            <label class="field-label" for="lobby-avatar">头像</label>
+            <select id="lobby-avatar" class="text-input avatar-select" aria-label="选择 emoji 头像"></select>
+            <p class="field-hint">昵称最多 10 个字符，入座和游戏中都可以修改。</p>
+          </article>
+
+          <article class="paper-card action-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">开一桌</p>
+                <h2>创建房间</h2>
+              </div>
+              <span class="card-number">01</span>
+            </div>
+            <label class="field-label" for="create-max-seats">本局最大座位数</label>
+            <select id="create-max-seats" class="text-input">
+              <option value="2">2 人</option>
+              <option value="3">3 人</option>
+              <option value="4" selected>4 人</option>
+              <option value="5">5 人（双牌库）</option>
+              <option value="6">6 人（双牌库）</option>
+            </select>
+            <button id="create-room-button" class="primary-button wide-button" type="button">
+              <span>创建房间</span>
+              <span aria-hidden="true">→</span>
+            </button>
+            <p class="fine-print">创建后你就是房主，负责开局和房间设置。</p>
+          </article>
+
+          <article class="paper-card action-card join-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">找朋友</p>
+                <h2>加入房间</h2>
+              </div>
+              <span class="card-number">02</span>
+            </div>
+            <label class="field-label" for="join-code">6 位房间号</label>
+            <input
+              id="join-code"
+              class="room-code-input"
+              type="text"
+              inputmode="numeric"
+              maxlength="6"
+              autocomplete="off"
+              placeholder="000000"
+              aria-describedby="join-hint">
+            <button id="join-room-button" class="secondary-button wide-button" type="button">
+              <span>加入房间</span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <p id="join-hint" class="fine-print">房主在线且房间未开局时才能加入。</p>
+          </article>
+        </div>
+
+        <p class="connection-note">
+          联机使用 PeerJS 公共信令与 WebRTC。首次连接需要加载外部脚本，请允许浏览器访问网络。
+        </p>
+      </section>
+
+      <!-- 等待房间 -->
+      <section id="room-screen" class="screen" hidden>
+        <div class="room-header">
+          <div>
+            <p class="eyebrow">等待入座</p>
+            <div class="room-title-row">
+              <h1>房间 <span id="room-code-display">------</span></h1>
+              <button id="copy-room-button" class="small-button" type="button">复制邀请</button>
+            </div>
+          </div>
+          <button id="leave-room-button" class="text-button danger-text" type="button">离开房间</button>
+        </div>
+
+        <div class="room-layout">
+          <section class="table-panel waiting-panel" aria-label="座位区域">
+            <div id="waiting-ring" class="seat-ring waiting-ring"></div>
+            <div class="table-center waiting-center">
+              <span class="round-label">入座等待区</span>
+              <strong id="waiting-count">0 / 0</strong>
+              <p>点击空位入座</p>
+            </div>
+          </section>
+
+          <aside class="side-stack">
+            <section class="paper-card compact-card">
+              <div class="card-heading compact-heading">
+                <div>
+                  <p class="eyebrow">主持人</p>
+                  <h2>房间设置</h2>
+                </div>
+                <span id="host-key-badge" class="key-badge" hidden>🔑 房主</span>
+              </div>
+
+              <label class="field-label" for="room-max-seats">最大座位数</label>
+              <select id="room-max-seats" class="text-input">
+                <option value="2">2 人</option>
+                <option value="3">3 人</option>
+                <option value="4">4 人</option>
+                <option value="5">5 人（双牌库）</option>
+                <option value="6">6 人（双牌库）</option>
+              </select>
+
+              <label class="field-label" for="deck-count">牌库</label>
+              <select id="deck-count" class="text-input">
+                <option value="1">一副牌 / 单次最多 4 张</option>
+                <option value="2">两副牌 / 单次最多 8 张</option>
+              </select>
+              <p id="deck-lock-hint" class="field-hint">超过 4 人时自动锁定两副牌。</p>
+
+              <label class="toggle-row" for="report-three">
+                <span>
+                  <strong>剩三张公开播报</strong>
+                  <small>有人降到 3 张时提醒全桌</small>
+                </span>
+                <input id="report-three" type="checkbox" checked>
+                <span class="toggle-track" aria-hidden="true"></span>
+              </label>
+
+              <button id="start-game-button" class="primary-button wide-button" type="button" disabled>
+                等待座位坐满
+              </button>
+              <p id="start-help" class="fine-print">全部座位坐满后，房主才能开始。</p>
+            </section>
+
+            <section class="paper-card compact-card">
+              <div class="card-heading compact-heading">
+                <div>
+                  <p class="eyebrow">随时修改</p>
+                  <h2>我的资料</h2>
+                </div>
+                <span id="room-profile-preview" class="profile-preview small-preview">🦊</span>
+              </div>
+              <label class="field-label" for="room-name">昵称</label>
+              <input id="room-name" class="text-input" type="text" maxlength="10" autocomplete="nickname">
+              <label class="field-label" for="room-avatar">头像</label>
+              <select id="room-avatar" class="text-input avatar-select" aria-label="选择 emoji 头像"></select>
+            </section>
+          </aside>
+        </div>
+
+        <div class="bottom-grid">
+          <section class="paper-card list-card">
+            <div class="card-heading compact-heading">
+              <div>
+                <p class="eyebrow">还没有座位</p>
+                <h2>等待人员</h2>
+              </div>
+              <span id="waiting-members-count" class="count-chip">0</span>
+            </div>
+            <div id="waiting-members" class="pill-list">
+              <p class="empty-note">大家都在座位上了。</p>
+            </div>
+          </section>
+
+          <section class="paper-card chat-card">
+            <div class="card-heading compact-heading">
+              <div>
+                <p class="eyebrow">小声聊两句</p>
+                <h2>房间聊天</h2>
+              </div>
+            </div>
+            <div id="room-chat-log" class="chat-log" aria-live="polite"></div>
+            <form id="room-chat-form" class="chat-form">
+              <input id="room-chat-input" class="text-input" type="text" maxlength="80" placeholder="发条消息…">
+              <button class="small-button" type="submit">发送</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <!-- 游戏主界面 -->
+      <section id="game-screen" class="screen game-screen" hidden>
+        <div class="game-topbar">
+          <div>
+            <span class="game-room-label">房间</span>
+            <strong id="game-room-code">------</strong>
+            <span id="game-settings-label" class="status-pill">一副牌</span>
+          </div>
+          <div class="game-top-actions">
+            <button id="return-room-button" class="small-button" type="button" hidden>返回房间</button>
+            <button id="game-profile-button" class="small-button" type="button">资料</button>
+            <button id="game-chat-button" class="small-button" type="button">聊天</button>
+            <button id="game-leave-button" class="text-button danger-text" type="button">离开</button>
+          </div>
+        </div>
+
+        <div id="network-banner" class="network-banner" hidden></div>
+
+        <section class="game-table-wrap" aria-label="牌桌">
+          <div id="game-ring" class="seat-ring game-ring"></div>
+
+          <div class="game-center">
+            <div id="turn-banner" class="turn-banner">等待开局</div>
+            <div class="target-row">
+              <span>本轮目标</span>
+              <strong id="target-display">—</strong>
+            </div>
+            <div id="table-pile" class="table-pile" aria-label="桌面倒扣牌"></div>
+            <p id="table-hint" class="table-hint">出牌后，其他玩家可跟牌、过牌或掀牌。</p>
+          </div>
+        </section>
+
+        <section class="hand-dock">
+          <div class="hand-toolbar">
+            <div class="hand-summary">
+              <strong>我的手牌</strong>
+              <span id="selection-summary">未选择</span>
+            </div>
+            <div class="hand-tools">
+              <div class="hand-scroll-tools" aria-label="横向浏览手牌">
+                <button id="hand-scroll-left" class="small-button" type="button" aria-label="向左浏览手牌">‹</button>
+                <button id="hand-scroll-right" class="small-button" type="button" aria-label="向右浏览手牌">›</button>
+              </div>
+              <label id="target-picker-wrap" class="target-picker" for="target-rank">
+                <span>宣告</span>
+                <select id="target-rank" aria-label="选择本轮目标点数">
+                  <option value="">点数</option>
+                </select>
+              </label>
+              <button id="sort-hand-button" class="small-button" type="button">一键理牌</button>
+            </div>
+          </div>
+
+          <div id="my-hand" class="my-hand" aria-label="我的手牌"></div>
+
+          <div id="challenge-bar" class="challenge-bar" hidden>
+            <span id="challenge-instruction">请手动点选 1 张桌面牌</span>
+            <button id="confirm-challenge-button" class="danger-button" type="button" disabled>确认掀牌</button>
+            <button id="cancel-challenge-button" class="text-button" type="button">取消</button>
+          </div>
+
+          <div class="action-row">
+            <button id="play-button" class="primary-button" type="button" disabled>出牌</button>
+            <button id="challenge-button" class="danger-button" type="button" disabled>掀牌</button>
+            <button id="pass-button" class="secondary-button" type="button" disabled>过牌</button>
+          </div>
+          <p id="action-help" class="action-help">等待其他玩家操作。</p>
+        </section>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>唬牌 · 本地定制版</span>
+      <span>不保存玩家数据 · 房主关闭页面即散局</span>
+    </footer>
+  </div>
+
+  <!-- 游戏内聊天抽屉 -->
+  <aside id="game-chat-drawer" class="chat-drawer" aria-label="游戏聊天" hidden>
+    <div class="drawer-heading">
+      <div>
+        <p class="eyebrow">边玩边聊</p>
+        <h2>房间聊天</h2>
+      </div>
+      <button id="close-game-chat-button" class="icon-button" type="button" aria-label="关闭聊天">×</button>
+    </div>
+    <div id="game-chat-log" class="chat-log"></div>
+    <form id="game-chat-form" class="chat-form">
+      <input id="game-chat-input" class="text-input" type="text" maxlength="80" placeholder="发条消息…">
+      <button class="small-button" type="submit">发送</button>
+    </form>
+  </aside>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- 通用弹窗：规则、掀牌结果、游戏结果、连接错误。 -->
+  <dialog id="app-dialog" class="app-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <p id="dialog-eyebrow" class="eyebrow">唬牌</p>
+          <h2 id="dialog-title">提示</h2>
+        </div>
+        <button class="icon-button" value="close" aria-label="关闭">×</button>
+      </div>
+      <div id="dialog-body" class="dialog-body"></div>
+      <div id="dialog-actions" class="dialog-actions"></div>
+    </form>
+  </dialog>
+
+  <noscript>
+    <div class="noscript-note">这个游戏需要 JavaScript 才能运行。</div>
+  </noscript>
+
+  <script src="js/config.js"></script>
+  <script src="js/constants.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/network.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
